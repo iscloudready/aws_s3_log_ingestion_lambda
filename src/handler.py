@@ -258,15 +258,215 @@ async def send_log(session, url, data, headers):
 
     raise MaxRetriesException()
 
-
 def create_log_payload_request(data, session):
     payload = _package_log_payload(data)
     payload = _compress_payload(payload)
     req = create_request(payload)
     return send_log(session, req.get_full_url(), req.data, req.headers)
 
+def _get_log_type():
+    """
+    Retrieves the log type from environment or configuration.
+    Modify this function to suit your specific implementation.
+    """
+    # Retrieve the log type from environment variable or configuration file
+    log_type = "apache_error" #os.getenv("LOG_TYPE")  # Modify this to match your environment variable name or configuration access
 
+    # Return the log type
+    return log_type
+
+def create_apache_errorlog_payload_request(file_path):
+    # Load log data from the text file
+    with open(file_path, 'r') as file:
+        log_lines = file.readlines()
+
+    # Define the pattern to match different attributes
+    pattern = r'\[(.*?)\] \[(.*?)\] \[pid=(.*?)\] (.*?) "-" "(.*?)" vhost=(.*?) forwarded_for="(.*?)" request_id="(.*?)" hosting_site=(.*?) (.*?): (.*?)'
+
+    log_entries = []
+    for line in log_lines:
+        # Use regex to extract attribute values
+        matches = re.match(pattern, line)
+
+        if matches:
+            attributes = {
+                "Timestamp": matches.group(1),
+                "Error Level": matches.group(2),
+                "PID": matches.group(3),
+                "IP Address": matches.group(4),
+                "User Agent": matches.group(5),
+                "VHost": matches.group(6),
+                "Forwarded For": matches.group(7),
+                "Request ID": matches.group(8),
+                "Hosting Site": matches.group(9),
+                "Error Message": matches.group(10)
+            }
+
+            log_entries.append(attributes)
+
+    # Convert to JSON
+    json_output = json.dumps(log_entries, indent=4)
+    return json_output
+
+async def _fetch_custom_logs(log_file_url, s3MetaData):
+    async with aiohttp.ClientSession() as session:
+        log_batches = []
+        batch_request = []
+        batch_counter = 1
+        log_batch_size = 0
+        start = time.time()
+        with open(log_file_url, encoding='utf-8') as log_lines:
+            for index, log in enumerate(log_lines):
+                log_batch_size += sys.getsizeof(str(log))
+                if index % 500 == 0:
+                    logger.debug(f"index: {index}")
+                    logger.debug(f"log_batch_size: {log_batch_size}")
+                log_batches.append(log)
+                if log_batch_size > (MAX_BATCH_SIZE * BATCH_SIZE_FACTOR):
+                    logger.debug(f"sending batch: {batch_counter} log_batch_size: {log_batch_size}")
+                    data = {"context": s3MetaData, "entry": log_batches}
+                    batch_request.append(create_log_payload_request(data, session))
+                    if len(batch_request) >= REQUEST_BATCH_SIZE:
+                        await asyncio.gather(*batch_request)
+                        batch_request = []
+                    log_batches = []
+                    log_batch_size = 0
+                    batch_counter += 1
+        data = {"context": s3MetaData, "entry": log_batches}
+        batch_request.append(create_log_payload_request(data, session))
+        logger.info("Sending data to NR logs.....")
+        output = await asyncio.gather(*batch_request)
+        end = time.time()
+        logger.debug(f"time elapsed to send to NR Logs: {end - start}")
+        
 async def _fetch_data_from_s3(bucket, key, context):
+    """
+    Stream data from S3 bucket. Create batches of size MAX_PAYLOAD_SIZE
+    and create async requests from batches
+    """
+    log_file_size = boto3.resource('s3').Bucket(bucket).Object(key).content_length
+    if log_file_size > MAX_FILE_SIZE:
+        logger.error("The log file uploaded to S3 is larger than the supported max size of 400MB")
+        return
+
+    s3MetaData = {
+        "invoked_function_arn": context.invoked_function_arn,
+        "s3_bucket_name": bucket,
+        "s3_key": key
+    }
+
+    log_file_url = "s3://{}/{}".format(bucket, key)
+    log_type = _get_log_type()
+
+    if log_type == "custom":
+        await _fetch_custom_logs(log_file_url, s3MetaData)
+    elif log_type == "apache_error":
+        await _fetch_apache_error_logs(log_file_url, s3MetaData)
+    elif log_type == "apache_access":
+        await _fetch_apache_access_logs(log_file_url, s3MetaData)
+    else:
+        logger.error("Invalid log type specified.")
+        
+async def _fetch_data_from_s33(bucket, key, context):
+    """
+    Stream data from S3 bucket. Create batches of size MAX_PAYLOAD_SIZE
+    and create async requests from batches
+    """
+    log_file_size = boto3.resource('s3').Bucket(bucket).Object(key).content_length
+    if log_file_size > MAX_FILE_SIZE:
+        logger.error("The log file uploaded to S3 is larger than the supported max size of 400MB")
+        return
+
+    BATCH_SIZE_FACTOR = _get_batch_size_factor()
+    s3MetaData = {
+        "invoked_function_arn": context.invoked_function_arn,
+        "s3_bucket_name": bucket,
+        "s3_key": key
+    }
+    log_file_url = f"s3://{bucket}/{key}"
+    # log_file_url = "s3://{}/{}".format(bucket, key)
+
+    # Switch functionality based on log type
+    log_type = _get_log_type()  # Get the log type from environment or configuration
+
+    if log_type == "apache_error":
+        # Use the convert_log_file_to_json function for Apache error logs
+        json_output = create_apache_errorlog_payload_request(log_file_url, s3MetaData)
+    elif log_type == "apache_access":
+        # Use another function or logic to handle Apache access logs
+        json_output = convert_apache_access_logs(log_file_url, s3MetaData)
+    elif log_type == "custom":
+        # Handle custom log type here
+        #json_output = convert_custom_logs(log_file_url)
+        await _fetch_custom_logs(log_file_url, s3MetaData)
+    else:
+        # Unknown log type
+        logger.error("Unknown log type: {}".format(log_type))
+        return
+
+    async with aiohttp.ClientSession() as session:
+        log_batches = []
+        batch_request = []
+        batch_counter = 1
+        log_batch_size = 0
+        start = time.time()
+
+        # Use the json_output as the data parameter for log payload
+        data = {"context": s3MetaData, "entry": json_output}
+        log_batches.append(data)
+
+        for index, log in enumerate(log_batches):
+            log_batch_size += sys.getsizeof(str(log))
+            if index % 500 == 0:
+                logger.debug(f"index: {index}")
+                logger.debug(f"log_batch_size: {log_batch_size}")
+            if log_batch_size > (MAX_BATCH_SIZE * BATCH_SIZE_FACTOR):
+                logger.debug(f"sending batch: {batch_counter} log_batch_size: {log_batch_size}")
+                batch_request.append(create_log_payload_request(log, session))
+                if len(batch_request) >= REQUEST_BATCH_SIZE:
+                    await asyncio.gather(*batch_request)
+                    batch_request = []
+                log_batch_size = 0
+                batch_counter += 1
+
+        batch_request.append(create_log_payload_request(log, session))
+        logger.info("Sending data to NR logs.....")
+        output = await asyncio.gather(*batch_request)
+        end = time.time()
+        logger.debug(f"time elapsed to send to NR Logs: {end - start}")
+
+async def _fetch_custom_logs(log_file_url, s3MetaData):
+    async with aiohttp.ClientSession() as session:
+        log_batches = []
+        batch_request = []
+        batch_counter = 1
+        log_batch_size = 0
+        start = time.time()
+        with open(log_file_url, encoding='utf-8') as log_lines:
+            for index, log in enumerate(log_lines):
+                log_batch_size += sys.getsizeof(str(log))
+                if index % 500 == 0:
+                    logger.debug(f"index: {index}")
+                    logger.debug(f"log_batch_size: {log_batch_size}")
+                log_batches.append(log)
+                if log_batch_size > (MAX_BATCH_SIZE * BATCH_SIZE_FACTOR):
+                    logger.debug(f"sending batch: {batch_counter} log_batch_size: {log_batch_size}")
+                    data = {"context": s3MetaData, "entry": log_batches}
+                    batch_request.append(create_log_payload_request(data, session))
+                    if len(batch_request) >= REQUEST_BATCH_SIZE:
+                        await asyncio.gather(*batch_request)
+                        batch_request = []
+                    log_batches = []
+                    log_batch_size = 0
+                    batch_counter += 1
+        data = {"context": s3MetaData, "entry": log_batches}
+        batch_request.append(create_log_payload_request(data, session))
+        logger.info("Sending data to NR logs.....")
+        output = await asyncio.gather(*batch_request)
+        end = time.time()
+        logger.debug(f"time elapsed to send to NR Logs: {end - start}")
+
+async def _fetch_data_from_s3_depreciated(bucket, key, context):
     """
         Stream data from S3 bucket. Create batches of size MAX_PAYLOAD_SIZE
         and create async requests from batches
