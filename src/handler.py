@@ -13,7 +13,6 @@ from smart_open import open
 import re
 from dateutil import parser
 
-
 logger = logging.getLogger()
 
 US_LOGGING_INGEST_HOST = "https://log-api.newrelic.com/log/v1"
@@ -32,15 +31,17 @@ class InvalidArgumentException(Exception):
 def _format_error(e, text):
     return "{}. {}".format(e, text)
 
+
 def _get_optional_env(key, default):
     """
     Returns the default value even if the environment variable is set but empty
     """
     return os.getenv(key, default) or default
 
+
 def _get_additional_attributes(attributes=None):
     """
-    This function gets Environment variable 'ADDITIONAL_ATTRIBUTES' and parses the  same as a json object. Defaults
+    This function gets Environment variable 'ADDITIONAL_ATTRIBUTES' and parses the same as a json object. Defaults
     to an empty map.
     :param `additional_attributes` : Returns the parameter value if present
     :raises
@@ -108,12 +109,14 @@ def _isCloudTrail(key=None, regex_pattern=None):
 
     return bool(re.search(regex_pattern, key))
 
+
 def _convert_float(s):
     try:
         f = float(s)
     except ValueError:
         f = 1.5
     return f
+
 
 def _get_batch_size_factor(batch_size_factor=None):
     """
@@ -122,6 +125,7 @@ def _get_batch_size_factor(batch_size_factor=None):
     if batch_size_factor:
         return batch_size_factor
     return _convert_float(_get_optional_env("BATCH_SIZE_FACTOR", BATCH_SIZE_FACTOR))
+
 
 def _get_license_key(license_key=None):
     """
@@ -258,11 +262,13 @@ async def send_log(session, url, data, headers):
 
     raise MaxRetriesException()
 
+
 def create_log_payload_request(data, session):
     payload = _package_log_payload(data)
     payload = _compress_payload(payload)
     req = create_request(payload)
     return send_log(session, req.get_full_url(), req.data, req.headers)
+
 
 def _get_log_type():
     """
@@ -270,14 +276,20 @@ def _get_log_type():
     Modify this function to suit your specific implementation.
     """
     # Retrieve the log type from environment variable or configuration file
-    log_type = "apache_error" #os.getenv("LOG_TYPE")  # Modify this to match your environment variable name or configuration access
+    log_type = "apache_error"  # os.getenv("LOG_TYPE")  # Modify this to match your environment variable name or configuration access
 
     # Return the log type
     return log_type
 
-def create_apache_errorlog_payload_request(file_path):
+
+async def _fetch_apache_access_logs(log_file_url, s3MetaData):
+    # Add your implementation for fetching Apache access logs here
+    pass
+
+
+def _fetch_apache_error_logs(log_file_url, s3MetaData):
     # Load log data from the text file
-    with open(file_path, 'r') as file:
+    with open(log_file_url, 'r') as file:
         log_lines = file.readlines()
 
     # Define the pattern to match different attributes
@@ -307,6 +319,7 @@ def create_apache_errorlog_payload_request(file_path):
     # Convert to JSON
     json_output = json.dumps(log_entries, indent=4)
     return json_output
+
 
 async def _fetch_custom_logs(log_file_url, s3MetaData):
     async with aiohttp.ClientSession() as session:
@@ -338,7 +351,8 @@ async def _fetch_custom_logs(log_file_url, s3MetaData):
         output = await asyncio.gather(*batch_request)
         end = time.time()
         logger.debug(f"time elapsed to send to NR Logs: {end - start}")
-        
+
+
 async def _fetch_data_from_s3(bucket, key, context):
     """
     Stream data from S3 bucket. Create batches of size MAX_PAYLOAD_SIZE
@@ -361,12 +375,13 @@ async def _fetch_data_from_s3(bucket, key, context):
     if log_type == "custom":
         await _fetch_custom_logs(log_file_url, s3MetaData)
     elif log_type == "apache_error":
-        await _fetch_apache_error_logs(log_file_url, s3MetaData)
+        _fetch_apache_error_logs(log_file_url, s3MetaData)
     elif log_type == "apache_access":
         await _fetch_apache_access_logs(log_file_url, s3MetaData)
     else:
         logger.error("Invalid log type specified.")
-        
+
+
 async def _fetch_data_from_s33(bucket, key, context):
     """
     Stream data from S3 bucket. Create batches of size MAX_PAYLOAD_SIZE
@@ -435,6 +450,7 @@ async def _fetch_data_from_s33(bucket, key, context):
         end = time.time()
         logger.debug(f"time elapsed to send to NR Logs: {end - start}")
 
+
 async def _fetch_custom_logs(log_file_url, s3MetaData):
     async with aiohttp.ClientSession() as session:
         log_batches = []
@@ -465,6 +481,7 @@ async def _fetch_custom_logs(log_file_url, s3MetaData):
         output = await asyncio.gather(*batch_request)
         end = time.time()
         logger.debug(f"time elapsed to send to NR Logs: {end - start}")
+
 
 async def _fetch_data_from_s3_depreciated(bucket, key, context):
     """
